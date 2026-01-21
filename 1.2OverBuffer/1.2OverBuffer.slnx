@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="1.2OverBuffer/1.2OverBuffer.vcxproj" Id="d9d8c9e2-e4e6-433b-bc7c-d360728dd2c6" />
+</Solution>

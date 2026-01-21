@@ -1,0 +1,14 @@
+
+x64/
+Debug/
+Release/
+.vs/
+
+
+*.exe
+*.obj
+*.pdb
+*.user
+*.suo
+*.db
+*.ipch
