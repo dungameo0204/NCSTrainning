@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="linhtinh/linhtinh.vcxproj" Id="c3ab2c4e-d5e4-4fc9-ad31-20b469c7dfa2" />
+  <Project Path="Child/Child.vcxproj" Id="b9fe10e0-2927-4cfa-ba4f-cb0cc01e5a54" />
 </Solution>

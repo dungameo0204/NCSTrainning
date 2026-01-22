@@ -24,7 +24,7 @@ int main() {
     printf("\n=== CACH 2: NHAP SO NGUYEN (Machine View) ===\n");
     // Giờ ta sửa thẳng vào biến 'wholeValue'
     // 0x01020304 tương ứng với các byte 01, 02, 03, 04
-    ip.wholeValue = 0x04030201;
+    ip.wholeValue = 0xA01A8C0;
 
     printf("Da gan gia tri nguyen lon la: 0x%08X\n", ip.wholeValue);
     printf("Tu dong tach ra thanh: %d.%d.%d.%d\n",
