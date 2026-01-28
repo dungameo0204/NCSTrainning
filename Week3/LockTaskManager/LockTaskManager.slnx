@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="LockTaskManager/LockTaskManager.vcxproj" Id="8a91f348-653e-4539-bb45-b93453f5807c" />
+</Solution>
