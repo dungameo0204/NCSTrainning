@@ -1,0 +1,8 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Hacker/Hacker.vcxproj" Id="dafce534-6827-4cfd-884b-42ff6081ddf4" />
+  <Project Path="Victim/Victim.vcxproj" Id="c368da42-fe51-4093-a527-d3560e6d94a1" />
+</Solution>

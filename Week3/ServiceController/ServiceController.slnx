@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="ServiceController/ServiceController.vcxproj" />
+  <Project Path="ServiceController/ServiceController.vcxproj" Id="3857bbad-04d9-448e-8e23-0a1efcba5ff8" />
 </Solution>

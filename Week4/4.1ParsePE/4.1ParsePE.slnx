@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="IFEO/IFEO.vcxproj" Id="b7d634d8-ff77-4c12-8224-f41e2c3afb92" />
+  <Project Path="4.1ParsePE/4.1ParsePE.vcxproj" Id="cd567d4f-4618-43ee-a59c-4ccfe7183b47" />
 </Solution>

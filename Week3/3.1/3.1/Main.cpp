@@ -102,17 +102,17 @@ int main() {
 
     wcout << L"--- 1. GHI ---" << endl;
     // (Giả sử bạn đã copy hàm WriteToRegistry từ bài trước)
-    // WriteToRegistry(myPath, myVar, L"Nguyen Van A");
+    WriteToRegistry(myPath, myVar, L"Nguyen Van A");
 
     wcout << L"\n--- 2. DOC LAN 1 ---" << endl;
     // (Giả sử bạn đã copy hàm ReadFromRegistry từ bài trước)
-    // ReadFromRegistry(myPath, myVar);
+    ReadFromRegistry(myPath, myVar);
 
     wcout << L"\n--- 3. XOA ---" << endl;
     DeleteFromRegistry(myPath, myVar);
 
     wcout << L"\n--- 4. DOC LAN 2 (Kiem chung) ---" << endl;
-    // ReadFromRegistry(myPath, myVar); 
+    ReadFromRegistry(myPath, myVar); 
     // -> Lúc này nó sẽ báo lỗi "Khong tim thay"
 
     system("pause");
