@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="4.2ScanPE/4.2ScanPE.vcxproj" />
+  <Project Path="4.2ScanPE/4.2ScanPE.vcxproj" Id="39f6eacf-524a-41d9-9398-ea6618910c6f" />
 </Solution>

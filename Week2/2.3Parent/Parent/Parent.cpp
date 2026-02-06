@@ -36,7 +36,7 @@ int main() {
     ZeroMemory(&pi, sizeof(pi));
 
     // Sửa đường dẫn cho đúng file Child.exe của bạn
-    char cmdLine[] = "D:\\Trainning\\Project\\NCSTrainning\\2.3Child\\x64\\Debug\\Child.exe\ ";
+    char cmdLine[] = "D:\\NCSTrainning\\Project\\Trainning\\Week2\\2.3Child\\x64\\Debug\\Child.exe\ ";
 
     cout << "[CHA] Dang bat Con va nghe len..." << endl;
 
