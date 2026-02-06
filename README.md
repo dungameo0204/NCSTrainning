@@ -14,12 +14,12 @@ Hệ thống quét virus mô hình Client-Server (Windows Service), hỗ trợ �
 **Bước 1: Clone mã nguồn**
 Mở CMD/Terminal và chạy:
 ```bash
-git clone [https://github.com/dungameo0204/NCSTrainning]([https://github.com/username/MyAvProject.git](https://github.com/dungameo0204/NCSTrainning))
-cd MyAvProject
+git clone https://github.com/dungameo0204/NCSTrainning.git
+cd Week5/Baitaplon
 ```
 
 **Bước 2: Build Project**
-1. Mở file `MyAvProject.sln` bằng Visual Studio.
+1. Mở file `Baitaplon.sln` bằng Visual Studio.
 2. Chuyển cấu hình sang **Release - x64**.
 3. Bấm **Build Solution** (`Ctrl + Shift + B`).
 4. Kiểm tra thư mục `x64/Release`, đảm bảo có đủ 3 file: `MyService.exe`, `MyClient.exe`, `ScannerEngine.dll`.
