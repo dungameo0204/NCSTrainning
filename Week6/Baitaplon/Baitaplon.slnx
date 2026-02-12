@@ -1,0 +1,14 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Folder Name="/Common/">
+    <File Path="Protocol.h" />
+  </Folder>
+  <Project Path="Baitaplon/Baitaplon.vcxproj" Id="2277f7e0-40de-460b-8fdb-dccd8674c5ff" />
+  <Project Path="EngineScan/EngineScan.vcxproj" Id="265f3932-5407-4e2c-b4f2-aa30eaf14164" />
+  <Project Path="MyClient/MyClient.vcxproj" Id="7c51c595-56d4-4194-8af6-1f3105000e15" />
+  <Project Path="MyService/MyService.vcxproj" Id="8530c162-9f1c-4bca-9ba4-c6a9498dabb2" />
+  <Project Path="TestLoader/TestLoader.vcxproj" Id="fbd7bc7a-339b-43ef-bcb7-11a7cf63769a" />
+</Solution>
