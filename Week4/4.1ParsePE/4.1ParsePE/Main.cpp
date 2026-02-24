@@ -16,7 +16,6 @@ void PrintTimeStamp(DWORD timeStamp) {
 }
 
 // Hàm chính để phân tích
-// Hàm chính để phân tích
 void AnalyzePE(const wchar_t* filePath) {
     wcout << L"---------------------------------------------------" << endl;
     wcout << L"DANG PHAN TICH FILE: " << filePath << endl;

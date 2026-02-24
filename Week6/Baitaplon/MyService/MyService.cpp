@@ -188,6 +188,19 @@ void OnClientMessage(uint16_t type, const std::vector<uint8_t>& payload) {
         PayloadWelcome welcome = { 999, 2, "OK" };
         g_ipcManager.Send(MSG_WELCOME, &welcome, sizeof(welcome), true);
     }
+    else if (type == MSG_RESUME) {
+        auto resume = reinterpret_cast<const PayloadResume*>(payload.data());
+
+        // Log ra để biết (Optional)
+        // wchar_t msg[100]; swprintf_s(msg, L"Client Resumed Session %d, LastSeq: %d", resume->sessionId, resume->lastEventSeq);
+        // WriteLogW(msg);
+
+        // Gửi một tin báo xác nhận đã Resume (Không bắt buộc nhưng nên có để Client an tâm)
+        PayloadJobStatus status = { 0 };
+        status.status = 1; // Running
+        wcscpy_s(status.message, L"--- CONNECTION RESUMED ---");
+        g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), true);
+    }
     else if (type == MSG_SCAN_REQ) {
         auto req = reinterpret_cast<const PayloadScanReq*>(payload.data());
 
