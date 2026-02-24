@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <atomic> 
+#include <algorithm> // Bổ sung thư viện này để dùng std::transform
 #include "Protocol.h"    
 #include "IPCManager.h"  
 
@@ -30,19 +31,16 @@ struct BatchContext {
     int32_t id;
     atomic<int32_t> totalFiles{ 0 };
     atomic<int32_t> processedFiles{ 0 };
-    atomic<bool>    isLoadFinished{ false }; // [FIX] Cờ báo hiệu Loader đã xong việc chưa
+    atomic<bool>    isLoadFinished{ false };
     wstring rootPath;
 };
 
 mutex g_JobMutex;
 condition_variable g_cvQueue;
 
-// Danh sách các Batch đang chờ xử lý
 deque<int32_t> g_BatchOrder;
-// Map chứa công việc của từng Batch
 map<int32_t, deque<JobContext>> g_BatchJobs;
-// Map chứa thông tin quản lý Batch
-map<int32_t, shared_ptr<BatchContext>> g_AllBatches; // Dùng shared_ptr cho an toàn
+map<int32_t, shared_ptr<BatchContext>> g_AllBatches;
 int32_t g_NextBatchId = 5000;
 
 // --- SCANNER ENGINE ---
@@ -61,6 +59,25 @@ bool LoadEngine() {
     return (g_ScanFile != NULL);
 }
 
+// --- KIỂM TRA POLICY: DANH SÁCH CẤM ---
+bool IsPathDeniedInService(const std::wstring& path) {
+    std::wstring lowerPath = path;
+    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::towlower);
+
+    std::vector<std::wstring> denyList = {
+        L"c:\\windows\\system32",
+        L"c:\\$recycle.bin",
+        L"c:\\$mfedeeprem"
+    };
+
+    for (const auto& deniedPath : denyList) {
+        if (lowerPath.find(deniedPath) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // --- WORKER THREAD (THỢ QUÉT) ---
 void WorkerThreadFunc() {
     while (true) {
@@ -70,75 +87,56 @@ void WorkerThreadFunc() {
 
         {
             unique_lock<mutex> lock(g_JobMutex);
-
-            // Chờ cho đến khi có Batch ID trong hàng đợi
             g_cvQueue.wait(lock, [] { return !g_BatchOrder.empty(); });
 
-            // Lấy Batch ID đầu tiên (nhưng chưa pop vội)
             batchId = g_BatchOrder.front();
 
-            // Kiểm tra xem Batch này còn tồn tại không (phòng hờ)
             if (g_AllBatches.find(batchId) == g_AllBatches.end()) {
                 g_BatchOrder.pop_front();
                 continue;
             }
             batchCtx = g_AllBatches[batchId];
 
-            // --- LOGIC QUAN TRỌNG: KHI NÀO THÌ XONG? ---
             if (g_BatchJobs[batchId].empty()) {
-                // Nếu hết việc VÀ Loader báo đã xong -> Batch hoàn thành
                 if (batchCtx->isLoadFinished) {
-                    // Xóa Batch khỏi hàng đợi xử lý
                     g_BatchOrder.pop_front();
 
-                    // Gửi tin báo Finished (CRITICAL = TRUE)
                     PayloadJobStatus status = { 0 }; status.jobId = batchId; status.status = 2;
                     wcscpy_s(status.message, L"Scan Finished");
 
-                    // Mở khóa trước khi gửi mạng để tránh lock lâu
                     lock.unlock();
                     g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), true);
                     continue;
                 }
                 else {
-                    // Hết việc nhưng Loader CHƯA xong -> Worker tạm ngủ chờ Loader đẩy thêm hàng
                     g_cvQueue.wait(lock);
-                    continue; // Quay lại đầu vòng lặp kiểm tra lại
+                    continue;
                 }
             }
 
-            // Có việc -> Lấy ra làm
             currentJob = g_BatchJobs[batchId].front();
             g_BatchJobs[batchId].pop_front();
         }
 
-        // --- XỬ LÝ SCAN (KHÔNG GIỮ LOCK) ---
         int result = g_ScanFile ? g_ScanFile(currentJob.filePath.c_str(), 0, NULL) : 0;
 
-        // Gửi tin trạng thái "Scanning..." (VERBOSE = FALSE -> CÓ THỂ BỊ DROP)
         PayloadJobStatus status = { 0 }; status.jobId = batchId; status.status = 1;
         wcsncpy_s(status.message, currentJob.filePath.c_str(), 255);
         g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), false);
 
-        // Cập nhật tiến độ và báo Virus
         if (batchCtx) {
             batchCtx->processedFiles++;
-
             if (result == 2) {
                 wcscpy_s(status.message, L"VIRUS FOUND!"); status.result = 2;
                 wcsncpy_s(status.threatList, currentJob.filePath.c_str(), 1000);
-                // Tin Virus là quan trọng -> CRITICAL = TRUE
                 g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), true);
             }
         }
-        // Worker làm xong 1 file thì quay lại vòng lặp ngay
     }
 }
 
-// --- LOADER THREAD (THỢ BỐC VÁC) ---
-// --- LOADER THREAD (THỢ BỐC VÁC) - BẢN FIX LỖI BIÊN DỊCH ---
+// --- LOADER THREAD (THỢ BỐC VÁC TỐI ƯU CÓ POLICY) ---
 void ThreadLoader(int32_t batchId, wstring rootPath) {
-    // Kiểm tra xem Batch còn tồn tại không để tránh Crash
     shared_ptr<BatchContext> batchCtx;
     {
         lock_guard<mutex> lock(g_JobMutex);
@@ -147,39 +145,63 @@ void ThreadLoader(int32_t batchId, wstring rootPath) {
         }
     }
 
-    if (!batchCtx) return; // Batch đã bị hủy
+    if (!batchCtx) return;
 
     try {
-        // [FIX] Bỏ 'options' đi để tương thích với C++ cũ
-        // Chỉ dùng iterator mặc định
-        for (auto& entry : fs::recursive_directory_iterator(rootPath)) {
+        // Dùng directory_options để an toàn lướt qua các file không có quyền truy cập
+        auto options = fs::directory_options::skip_permission_denied;
+        fs::recursive_directory_iterator it(rootPath, options);
+        fs::recursive_directory_iterator end;
+        std::error_code ec; // Bắt lỗi hệ thống để không văng Crash
+
+        while (it != end) {
             try {
-                if (fs::is_regular_file(entry)) {
+                std::wstring currentPath = it->path().wstring();
+
+                // ====================================================
+                // 1. KIỂM TRA POLICY: TRÁNH BOM MÌN NGAY TỪ XA
+                // ====================================================
+                if (IsPathDeniedInService(currentPath)) {
+                    // Nếu nó là THƯ MỤC CẤM -> Niêm phong, CẤM CHUI VÀO TRONG!
+                    if (it->is_directory(ec)) {
+                        it.disable_recursion_pending();
+                    }
+
+                    // Nhảy sang file/folder ngang hàng tiếp theo
+                    it.increment(ec);
+                    continue;
+                }
+
+                // ====================================================
+                // 2. FILE HỢP LỆ -> GIAO CHO WORKER
+                // ====================================================
+                if (it->is_regular_file(ec)) {
                     {
                         lock_guard<mutex> lock(g_JobMutex);
-                        g_BatchJobs[batchId].push_back({ entry.path().wstring() });
+                        g_BatchJobs[batchId].push_back({ currentPath });
                         batchCtx->totalFiles++;
                     }
-                    // Hú Worker dậy làm việc ngay
                     g_cvQueue.notify_one();
                 }
             }
             catch (...) {
-                // Bỏ qua file lỗi (Access Denied v.v...)
-                continue;
+                // Lỗi không đọc được 1 file cụ thể thì kệ nó, âm thầm bỏ qua
             }
+
+            // Tiến tới file tiếp theo (dùng error_code để không bị văng Exception)
+            it.increment(ec);
         }
     }
     catch (...) {
-        // Bắt lỗi nếu không mở được thư mục gốc
+        // Lỗi không mở được thư mục gốc
     }
 
     // --- BÁO CÁO ĐÃ XONG ---
     {
         lock_guard<mutex> lock(g_JobMutex);
-        batchCtx->isLoadFinished = true; // Đánh dấu đã load xong
+        batchCtx->isLoadFinished = true;
     }
-    g_cvQueue.notify_all(); // Hú tất cả Worker dậy để chốt đơn
+    g_cvQueue.notify_all();
 }
 
 // --- XỬ LÝ TIN NHẮN TỪ CLIENT ---
@@ -190,14 +212,8 @@ void OnClientMessage(uint16_t type, const std::vector<uint8_t>& payload) {
     }
     else if (type == MSG_RESUME) {
         auto resume = reinterpret_cast<const PayloadResume*>(payload.data());
-
-        // Log ra để biết (Optional)
-        // wchar_t msg[100]; swprintf_s(msg, L"Client Resumed Session %d, LastSeq: %d", resume->sessionId, resume->lastEventSeq);
-        // WriteLogW(msg);
-
-        // Gửi một tin báo xác nhận đã Resume (Không bắt buộc nhưng nên có để Client an tâm)
         PayloadJobStatus status = { 0 };
-        status.status = 1; // Running
+        status.status = 1;
         wcscpy_s(status.message, L"--- CONNECTION RESUMED ---");
         g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), true);
     }
@@ -209,22 +225,18 @@ void OnClientMessage(uint16_t type, const std::vector<uint8_t>& payload) {
             lock_guard<mutex> lock(g_JobMutex);
             batchId = g_NextBatchId++;
 
-            // Tạo Batch mới
             auto ctx = make_shared<BatchContext>();
             ctx->id = batchId;
             ctx->rootPath = req->filePath;
-            ctx->isLoadFinished = false; // Mới vào chưa xong
+            ctx->isLoadFinished = false;
 
             g_AllBatches[batchId] = ctx;
-
-            // [FIX] Đẩy Batch ID vào hàng đợi NGAY LẬP TỨC để Worker sẵn sàng
             g_BatchOrder.push_back(batchId);
         }
 
         PayloadScanResp resp = { (uint32_t)batchId, true };
         g_ipcManager.Send(MSG_SCAN_RESP, &resp, sizeof(resp), true);
 
-        // Chạy Loader ở Background
         std::thread(ThreadLoader, batchId, wstring(req->filePath)).detach();
     }
 }
@@ -250,7 +262,6 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
 
     if (!LoadEngine()) { g_ServiceStatus.dwCurrentState = SERVICE_STOPPED; SetServiceStatus(g_StatusHandle, &g_ServiceStatus); return; }
 
-    // Start 4 Worker Threads
     for (int i = 0; i < 4; i++) std::thread(WorkerThreadFunc).detach();
 
     g_ipcManager.SetCallback(OnClientMessage);
