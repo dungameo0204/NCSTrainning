@@ -171,11 +171,11 @@ void IPCManager::ProcessBuffer() {
 
 					if (h->payloadSize > 0) {
 						payload.assign(m_readBuffer.begin() + H_SIZE, m_readBuffer.begin() + total);
-						// [MỚI] Tính lại Checksum của data vừa nhận
+						//  Tính lại Checksum của data vừa nhận
 						calculatedChecksum = CalculateChecksum(payload.data(), payload.size());
 					}
 
-					// [MỚI] KIỂM TRA CHECKSUM
+					// KIỂM TRA CHECKSUM
 					if (h->checksum != calculatedChecksum) {
 						// Vứt gói tin này và báo lỗi về cho Client
 						PayloadError err = { 1, "Checksum validation failed!" };
@@ -188,7 +188,7 @@ void IPCManager::ProcessBuffer() {
 					}
 					else {
 						// ==========================================
-						// [MỚI] BẢO MẬT HANDSHAKE (IMPERSONATION)
+						//    BẢO MẬT HANDSHAKE (IMPERSONATION)
 						// ==========================================
 						bool isSecurityPassed = true;
 

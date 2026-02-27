@@ -133,9 +133,11 @@
   <ItemGroup>
     <ClCompile Include="EngineTester.cpp" />
     <ClCompile Include="PeReader.cpp" />
+    <ClCompile Include="RuleMatcher.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="PeReader.h" />
+    <ClInclude Include="RuleMatcher.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

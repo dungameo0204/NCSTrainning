@@ -12,7 +12,8 @@ enum MessageType : uint16_t {
     MSG_JOB_STATUS = 6,
     MSG_FLOW_CONTROL = 8,
     MSG_RESUME = 9, // [MỚI]
-    MSG_ERROR = 99 
+    MSG_ERROR = 99,
+    MSG_CANCEL_REQ = 0x1006
 };
 
 #pragma pack(push, 1)
@@ -38,6 +39,8 @@ struct PayloadJobStatus {
     int32_t  result;      // 0:Clean, 1:Suspicious, 2:Virus
     wchar_t  message[256];
     wchar_t  threatList[1024];
+    uint32_t totalFiles;
+    uint32_t processedFiles;
 };
 
 struct PayloadFlowControl { uint32_t droppedCount; };
@@ -66,3 +69,8 @@ inline uint32_t CalculateChecksum(const void* data, size_t size) {
     }
     return sum;
 }
+#pragma pack(push, 1)
+struct PayloadCancelReq {
+    uint32_t jobId;
+};
+#pragma pack(pop)

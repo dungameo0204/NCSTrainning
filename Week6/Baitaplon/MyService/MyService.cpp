@@ -9,8 +9,10 @@
 #include <condition_variable>
 #include <filesystem>
 #include <atomic> 
-#include <algorithm> // Bổ sung thư viện này để dùng std::transform
-#include "Protocol.h"    
+#include <algorithm>
+#include <unordered_map>
+#include <fstream>
+#include "Protocol.h"     
 #include "IPCManager.h"  
 
 namespace fs = std::filesystem;
@@ -33,6 +35,11 @@ struct BatchContext {
     atomic<int32_t> processedFiles{ 0 };
     atomic<bool>    isLoadFinished{ false };
     wstring rootPath;
+    atomic<bool>    isCancelled{ false };
+
+    // [MỚI] GIỎ ĐỰNG DANH SÁCH VIRUS & ĐIỂM SỐ
+    mutex threatMutex;
+    vector<pair<wstring, float>> infectedFiles;
 };
 
 mutex g_JobMutex;
@@ -42,6 +49,27 @@ deque<int32_t> g_BatchOrder;
 map<int32_t, deque<JobContext>> g_BatchJobs;
 map<int32_t, shared_ptr<BatchContext>> g_AllBatches;
 int32_t g_NextBatchId = 5000;
+
+// ==========================================
+// HỆ THỐNG CACHE THÔNG MINH (SMART CACHE)
+// ==========================================
+struct CacheEntry {
+    int result;            // 0: Sạch, 2: Virus
+    uintmax_t fileSize;
+    long long writeTime;
+    float score;           // [MỚI] Lưu thêm điểm Heuristic vào RAM
+};
+
+std::unordered_map<std::wstring, CacheEntry> g_ScanCache;
+std::mutex g_CacheMutex;
+long long g_EngineVersion = 0;
+
+long long GetEngineVersion() {
+    try {
+        return fs::last_write_time(L"ScannerEngine.dll").time_since_epoch().count();
+    }
+    catch (...) { return 0; }
+}
 
 // --- SCANNER ENGINE ---
 typedef int(__stdcall* FnScanFile)(const wchar_t*, int, void*);
@@ -59,7 +87,57 @@ bool LoadEngine() {
     return (g_ScanFile != NULL);
 }
 
-// --- KIỂM TRA POLICY: DANH SÁCH CẤM ---
+void LoadCacheFromDisk() {
+    g_EngineVersion = GetEngineVersion();
+
+    std::wifstream file(L"scan_cache.bin", std::ios::binary);
+    if (!file.is_open()) return;
+
+    long long savedEngineVer = 0;
+    size_t cacheSize = 0;
+
+    file.read((wchar_t*)&savedEngineVer, sizeof(savedEngineVer));
+
+    if (savedEngineVer != g_EngineVersion) {
+        std::cout << "[CACHE] Phat hien Engine moi! Xoa so Cache cu." << std::endl;
+        return;
+    }
+
+    file.read((wchar_t*)&cacheSize, sizeof(cacheSize));
+
+    for (size_t i = 0; i < cacheSize; i++) {
+        size_t pathLen = 0;
+        file.read((wchar_t*)&pathLen, sizeof(pathLen));
+
+        std::wstring path; path.resize(pathLen);
+        file.read(&path[0], pathLen * sizeof(wchar_t));
+
+        CacheEntry entry;
+        file.read((wchar_t*)&entry, sizeof(CacheEntry));
+
+        g_ScanCache[path] = entry;
+    }
+    std::cout << "[CACHE] Nap thanh cong " << g_ScanCache.size() << " file vao RAM." << std::endl;
+}
+
+void SaveCacheToDisk() {
+    std::lock_guard<std::mutex> lock(g_CacheMutex);
+    std::wofstream file(L"scan_cache.bin", std::ios::binary | std::ios::trunc);
+    if (!file.is_open()) return;
+
+    file.write((const wchar_t*)&g_EngineVersion, sizeof(g_EngineVersion));
+    size_t cacheSize = g_ScanCache.size();
+    file.write((const wchar_t*)&cacheSize, sizeof(cacheSize));
+
+    for (const auto& pair : g_ScanCache) {
+        size_t pathLen = pair.first.size();
+        file.write((const wchar_t*)&pathLen, sizeof(pathLen));
+        file.write(pair.first.c_str(), pathLen * sizeof(wchar_t));
+        file.write((const wchar_t*)&pair.second, sizeof(CacheEntry));
+    }
+    std::cout << "[CACHE] Da luu " << cacheSize << " file xuong o cung." << std::endl;
+}
+
 bool IsPathDeniedInService(const std::wstring& path) {
     std::wstring lowerPath = path;
     std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::towlower);
@@ -71,9 +149,7 @@ bool IsPathDeniedInService(const std::wstring& path) {
     };
 
     for (const auto& deniedPath : denyList) {
-        if (lowerPath.find(deniedPath) == 0) {
-            return true;
-        }
+        if (lowerPath.find(deniedPath) == 0) return true;
     }
     return false;
 }
@@ -97,12 +173,44 @@ void WorkerThreadFunc() {
             }
             batchCtx = g_AllBatches[batchId];
 
+            // NẾU HẾT FILE THÌ CHỐT SỔ VÀ BÁO CÁO DANH SÁCH VIRUS
             if (g_BatchJobs[batchId].empty()) {
                 if (batchCtx->isLoadFinished) {
                     g_BatchOrder.pop_front();
 
-                    PayloadJobStatus status = { 0 }; status.jobId = batchId; status.status = 2;
-                    wcscpy_s(status.message, L"Scan Finished");
+                    PayloadJobStatus status = { 0 };
+                    status.jobId = batchId;
+                    status.status = 2; // Finished
+                    status.totalFiles = batchCtx->totalFiles.load();
+                    status.processedFiles = batchCtx->processedFiles.load();
+
+                    // [MỚI] TỔNG HỢP DANH SÁCH MÃ ĐỘC IN RA MÀN HÌNH CLIENT
+                    lock_guard<mutex> threatLock(batchCtx->threatMutex);
+                    if (batchCtx->infectedFiles.empty()) {
+                        wcscpy_s(status.message, L"Scan Finished: Safe! No threats found.");
+                        status.result = 0;
+                    }
+                    else {
+                        swprintf(status.message, 255, L"Scan Finished: Found %zu threats!", batchCtx->infectedFiles.size());
+                        status.result = 2;
+
+                        wstring aggregateList = L"";
+                        for (const auto& threat : batchCtx->infectedFiles) {
+                            wchar_t line[512];
+                            // Format: [4.5đ] C:\path\virus.exe
+                            swprintf(line, 512, L"[%.1f diem] %s\n", threat.second, threat.first.c_str());
+
+                            // Tránh tràn Buffer của IPC (Giới hạn threatList là 1000 byte)
+                            if (aggregateList.length() + wcslen(line) < 950) {
+                                aggregateList += line;
+                            }
+                            else {
+                                aggregateList += L"...(va nhieu file khac)\n";
+                                break;
+                            }
+                        }
+                        wcsncpy_s(status.threatList, aggregateList.c_str(), 1000);
+                    }
 
                     lock.unlock();
                     g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), true);
@@ -118,24 +226,73 @@ void WorkerThreadFunc() {
             g_BatchJobs[batchId].pop_front();
         }
 
-        int result = g_ScanFile ? g_ScanFile(currentJob.filePath.c_str(), 0, NULL) : 0;
+        if (batchCtx->isCancelled) continue;
 
-        PayloadJobStatus status = { 0 }; status.jobId = batchId; status.status = 1;
+        int result = 0;
+        bool needScan = true;
+        uintmax_t currentSize = 0;
+        long long currentTime = 0;
+        float currentScore = 0.0f; // [MỚI] Hứng điểm từ DLL
+
+        try {
+            currentSize = fs::file_size(currentJob.filePath);
+            currentTime = fs::last_write_time(currentJob.filePath).time_since_epoch().count();
+
+            std::lock_guard<std::mutex> cacheLock(g_CacheMutex);
+            auto it = g_ScanCache.find(currentJob.filePath);
+
+            if (it != g_ScanCache.end()) {
+                if (it->second.fileSize == currentSize && it->second.writeTime == currentTime) {
+                    result = it->second.result;
+                    currentScore = it->second.score; // Kéo điểm từ RAM ra
+                    needScan = false;
+                }
+            }
+        }
+        catch (...) {}
+
+        // 2. GỌI DLL QUÉT
+        if (needScan) {
+            // [MỚI] Truyền con trỏ &currentScore vào tham số thứ 3
+            result = g_ScanFile ? g_ScanFile(currentJob.filePath.c_str(), 0, &currentScore) : 0;
+
+            std::lock_guard<std::mutex> cacheLock(g_CacheMutex);
+            g_ScanCache[currentJob.filePath] = { result, currentSize, currentTime, currentScore };
+        }
+
+        // 3. XỬ LÝ NẾU TÓM ĐƯỢC VIRUS
+        PayloadJobStatus status = { 0 };
+        status.jobId = batchId;
+        status.status = 1; // Scanning
         wcsncpy_s(status.message, currentJob.filePath.c_str(), 255);
-        g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), false);
 
         if (batchCtx) {
             batchCtx->processedFiles++;
+
+            status.totalFiles = batchCtx->totalFiles.load();
+            status.processedFiles = batchCtx->processedFiles.load();
+
             if (result == 2) {
-                wcscpy_s(status.message, L"VIRUS FOUND!"); status.result = 2;
-                wcsncpy_s(status.threatList, currentJob.filePath.c_str(), 1000);
+                // Nhét vào giỏ rác của mẻ quét hiện tại
+                {
+                    lock_guard<mutex> threatLock(batchCtx->threatMutex);
+                    batchCtx->infectedFiles.push_back({ currentJob.filePath, currentScore });
+                }
+
+                wcscpy_s(status.message, L"VIRUS FOUND!");
+                status.result = 2;
+                // Báo động trực tiếp file này về Client
+                swprintf(status.threatList, 1000, L"[%.1f diem] %s", currentScore, currentJob.filePath.c_str());
                 g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), true);
+            }
+            else {
+                g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), false);
             }
         }
     }
 }
 
-// --- LOADER THREAD (THỢ BỐC VÁC TỐI ƯU CÓ POLICY) ---
+// --- LOADER THREAD ---
 void ThreadLoader(int32_t batchId, wstring rootPath) {
     shared_ptr<BatchContext> batchCtx;
     {
@@ -148,55 +305,49 @@ void ThreadLoader(int32_t batchId, wstring rootPath) {
     if (!batchCtx) return;
 
     try {
-        // Dùng directory_options để an toàn lướt qua các file không có quyền truy cập
         auto options = fs::directory_options::skip_permission_denied;
         fs::recursive_directory_iterator it(rootPath, options);
         fs::recursive_directory_iterator end;
-        std::error_code ec; // Bắt lỗi hệ thống để không văng Crash
+        std::error_code ec;
 
         while (it != end) {
+            if (batchCtx->isCancelled) break;
             try {
                 std::wstring currentPath = it->path().wstring();
 
-                // ====================================================
-                // 1. KIỂM TRA POLICY: TRÁNH BOM MÌN NGAY TỪ XA
-                // ====================================================
                 if (IsPathDeniedInService(currentPath)) {
-                    // Nếu nó là THƯ MỤC CẤM -> Niêm phong, CẤM CHUI VÀO TRONG!
-                    if (it->is_directory(ec)) {
-                        it.disable_recursion_pending();
-                    }
-
-                    // Nhảy sang file/folder ngang hàng tiếp theo
+                    if (it->is_directory(ec)) it.disable_recursion_pending();
                     it.increment(ec);
                     continue;
                 }
 
-                // ====================================================
-                // 2. FILE HỢP LỆ -> GIAO CHO WORKER
-                // ====================================================
                 if (it->is_regular_file(ec)) {
+                    int currentTotal = 0;
                     {
                         lock_guard<mutex> lock(g_JobMutex);
                         g_BatchJobs[batchId].push_back({ currentPath });
                         batchCtx->totalFiles++;
+                        currentTotal = batchCtx->totalFiles.load();
                     }
                     g_cvQueue.notify_one();
+
+                    if (currentTotal % 2000 == 0) {
+                        PayloadJobStatus status = { 0 };
+                        status.jobId = batchId;
+                        status.status = 1;
+                        status.totalFiles = currentTotal;
+                        status.processedFiles = batchCtx->processedFiles.load();
+                        wcscpy_s(status.message, L"... [He thong] Dang gom file vao hang doi ...");
+                        g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), false);
+                    }
                 }
             }
-            catch (...) {
-                // Lỗi không đọc được 1 file cụ thể thì kệ nó, âm thầm bỏ qua
-            }
-
-            // Tiến tới file tiếp theo (dùng error_code để không bị văng Exception)
+            catch (...) {}
             it.increment(ec);
         }
     }
-    catch (...) {
-        // Lỗi không mở được thư mục gốc
-    }
+    catch (...) {}
 
-    // --- BÁO CÁO ĐÃ XONG ---
     {
         lock_guard<mutex> lock(g_JobMutex);
         batchCtx->isLoadFinished = true;
@@ -239,6 +390,24 @@ void OnClientMessage(uint16_t type, const std::vector<uint8_t>& payload) {
 
         std::thread(ThreadLoader, batchId, wstring(req->filePath)).detach();
     }
+    else if (type == MSG_CANCEL_REQ) {
+        auto req = reinterpret_cast<const PayloadCancelReq*>(payload.data());
+        uint32_t cancelId = req->jobId;
+
+        lock_guard<mutex> lock(g_JobMutex);
+        if (g_AllBatches.find(cancelId) != g_AllBatches.end()) {
+            g_AllBatches[cancelId]->isCancelled = true;
+            g_BatchJobs[cancelId].clear();
+
+            PayloadJobStatus status = { 0 };
+            status.jobId = cancelId;
+            status.status = 3; // CANCELLED
+            wcscpy_s(status.message, L"Scan Cancelled by User");
+            g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), true);
+
+            g_cvQueue.notify_all();
+        }
+    }
 }
 
 // --- SERVICE MAIN ---
@@ -260,14 +429,19 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
 
     g_ServiceStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 
-    if (!LoadEngine()) { g_ServiceStatus.dwCurrentState = SERVICE_STOPPED; SetServiceStatus(g_StatusHandle, &g_ServiceStatus); return; }
-
+    if (!LoadEngine()) {
+        g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+        SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
+        return;
+    }
+    LoadCacheFromDisk();
     for (int i = 0; i < 4; i++) std::thread(WorkerThreadFunc).detach();
 
     g_ipcManager.SetCallback(OnClientMessage);
     if (g_ipcManager.Initialize()) {
         g_ipcManager.StartListening();
         WaitForSingleObject(g_ServiceStopEvent, INFINITE);
+        SaveCacheToDisk();
     }
     g_ServiceStatus.dwCurrentState = SERVICE_STOPPED; SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
 }

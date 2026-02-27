@@ -21,9 +21,15 @@
     <ClCompile Include="PeReader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="RuleMatcher.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="PeReader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="RuleMatcher.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

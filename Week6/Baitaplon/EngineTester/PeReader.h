@@ -1,23 +1,63 @@
-﻿
-#pragma once
+﻿#pragma once
 #include <windows.h>
+#include <winnt.h>
 #include <string>
 #include <vector>
 
-// Các mã lỗi khi Parse PE
+// Các mã trạng thái theo chuẩn đồ án
 enum class PeStatus {
     OK = 0,
     FILE_NOT_FOUND,
     ACCESS_DENIED,
-    FILE_TOO_SMALL,         // File nhỏ hơn cả DOS Header
-    INVALID_DOS_HEADER,     // Không có Magic 'MZ'
-    INVALID_NT_HEADER,      // Không có Magic 'PE\0\0'
-    INVALID_PE_ARCH,        // Không phải PE32 hay PE32+
-    MALFORMED_HEADER,       // e_lfanew trỏ ra ngoài file (File rác/cắt cụt)
-    STRUCT_CORRUPT          // Cấu trúc bên trong bị hỏng
+    MALFORMED_PE,    // File bị cắt, Header sai (DOS, NT Magic)
+    STRUCT_CORRUPT   // RVA ngoài vùng, Section Table tràn file
 };
+// Thêm 3 trạng thái chữ ký
+enum class SignatureStatus {
+    UNKNOWN,
+    UNSIGNED,           // Không có chữ ký
+    SIGNED_VALID,       // Có chữ ký và HỢP LỆ (Hàng xịn)
+    SIGNED_INVALID      // Có chữ ký nhưng BỊ LỖI / GIẢ MẠO (Cực kỳ nguy hiểm)
+};
+
+// Cấu trúc lưu 11 thông số bác yêu cầu
+struct PeMetaData {
+    WORD machine;
+    WORD subsystem;
+    bool isDll;
+    bool isDriver;
+    bool isManaged;  // .NET
+    bool isSigned;   // Có Security Directory
+    bool hasDebug;
+    bool hasRichHeader;
+    DWORD entryPointRva;
+    ULONGLONG imageBase;
+    WORD sectionCount;
+    DWORD timeDateStamp;
+    DWORD sectionAlignment;
+    DWORD fileAlignment;
+    DWORD numberOfRvaAndSizes;
+    IMAGE_DATA_DIRECTORY dataDirs[16];
+
+    // [BỔ SUNG NHÓM C]
+    std::vector<std::string> imports;      // Danh sách các hàm API bị gọi
+    bool hasTlsCallbacks = false;          // Cờ báo hiệu có TLS (Thái thượng hoàng)
+    bool hasDelayImport = false;           // Cờ báo hiệu có Delay-Load API
+    DWORD exportCount = 0;                 // Số lượng hàm Export ra ngoài
+
+    // [BỔ SUNG NHÓM D] - Resources & Version
+    bool hasVersionInfo = false;
+    bool hasIcon = false;
+    bool hasManifest = false;
+    bool hasRcData = false;      // Có chứa cục RCDATA nào không?
+    
+	// [NHÓM E] chữ ký số (Authenticode)
+    SignatureStatus sigStatus = SignatureStatus::UNKNOWN;
+};
+
+// Cấu trúc nội bộ lưu Section
 struct SectionInfo {
-    char name[9]; // Tên section (tối đa 8 ký tự + null)
+    char name[9];
     DWORD virtualAddress;
     DWORD virtualSize;
     DWORD rawAddress;
@@ -30,48 +70,33 @@ public:
     PeReader();
     ~PeReader();
 
-    // Hàm chính: Load file và Parse Header
     PeStatus LoadFile(const std::wstring& filePath);
-
-    // Dọn dẹp
     void Unload();
 
-    // Getters
-    bool IsLoaded() const { return m_data != nullptr; }
-    bool Is64Bit() const { return m_is64Bit; }
-    DWORD GetFileSize() const { return m_fileSize; }
-
-    // Truy xuất Header an toàn (trả về nullptr nếu chưa load)
-    PIMAGE_DOS_HEADER GetDosHeader() const { return m_dosHeader; }
-    PIMAGE_NT_HEADERS32 GetNtHeader32() const { return m_ntHeader32; }
-    PIMAGE_NT_HEADERS64 GetNtHeader64() const { return m_ntHeader64; }
-    PIMAGE_FILE_HEADER GetFileHeader() const; // Chung cho cả 32/64
-    // Trả về 0 nếu RVA không hợp lệ
     DWORD RvaToFileOffset(DWORD rva) const;
 
-    // [MỚI] Lấy danh sách Section
+    // Lấy thông tin đã parse
+    const PeMetaData& GetMetaData() const { return m_meta; }
     const std::vector<SectionInfo>& GetSections() const { return m_sections; }
-
-private:
-    // Kiểm tra xem vùng nhớ [offset, offset + size] có nằm gọn trong file không?
-    bool IsValidOffset(size_t offset, size_t size) const;
-    std::vector<SectionInfo> m_sections;
-
-    // Hàm nội bộ để parse section table
-    void ParseSections();
+    DWORD GetFileSize() const { return m_fileSize; } // Lấy kích thước file để tính Overlay
+    double CalculateEntropy(DWORD offset, DWORD size) const; // Vũ khí tối thượng
 
 private:
     HANDLE m_hFile;
     HANDLE m_hMapping;
-    LPBYTE m_data;          // Con trỏ gốc (Base Address của file trong RAM)
-    DWORD  m_fileSize;
+    LPBYTE m_data;
+    DWORD m_fileSize;
 
-    bool   m_is64Bit;
+    bool m_is64Bit;
+    PeMetaData m_meta;
+    std::vector<SectionInfo> m_sections;
 
-    // Các con trỏ trỏ vào nội dung bên trong m_data
-    PIMAGE_DOS_HEADER   m_dosHeader;
-    PIMAGE_NT_HEADERS32 m_ntHeader32;
-    PIMAGE_NT_HEADERS64 m_ntHeader64;
+    // Các hàm nội bộ
+    bool IsValidOffset(DWORD offset, DWORD size) const;
+    PeStatus ParseHeaders();
+    PeStatus ParseSections(DWORD sectionTableOffset);
+    bool CheckRichHeader(DWORD e_lfanew);
+
+    // Thêm hàm xác thực chữ ký bằng WinAPI
+    SignatureStatus VerifyCertificate(const std::wstring& filePath);
 };
-
-
