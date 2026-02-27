@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <fstream>
+#include <codecvt> 
 #include "Protocol.h"     
 #include "IPCManager.h"  
 
@@ -184,28 +185,58 @@ void WorkerThreadFunc() {
                     status.totalFiles = batchCtx->totalFiles.load();
                     status.processedFiles = batchCtx->processedFiles.load();
 
-                    // [MỚI] TỔNG HỢP DANH SÁCH MÃ ĐỘC IN RA MÀN HÌNH CLIENT
+                    // [MỚI] TỔNG HỢP DANH SÁCH MÀ XUẤT RA FILE LOG
                     lock_guard<mutex> threatLock(batchCtx->threatMutex);
                     if (batchCtx->infectedFiles.empty()) {
                         wcscpy_s(status.message, L"Scan Finished: Safe! No threats found.");
                         status.result = 0;
                     }
                     else {
-                        swprintf(status.message, 255, L"Scan Finished: Found %zu threats!", batchCtx->infectedFiles.size());
+                        // 1. TẠO FILE BÁO CÁO (LOG FILE)
+                        wstring logFileName = L"ScanReport_Job" + to_wstring(batchId) + L".txt";
+
+                        // Chuyển sang UTF-8 để ghi file txt không bị lỗi font tiếng Việt
+                        wofstream logFile(logFileName, ios::out | ios::trunc);
+
+                        // [FIX LỖI C4996] Ép Visual Studio câm mồm không được báo lỗi Deprecated của C++17
+#pragma warning(push)
+#pragma warning(disable: 4996)
+                        logFile.imbue(locale(locale::empty(), new codecvt_utf8<wchar_t>));
+#pragma warning(pop)
+
+                        if (logFile.is_open()) {
+                            logFile << L"==========================================================\n";
+                            logFile << L"            BÁO CÁO QUÉT MÃ ĐỘC (HEURISTIC ENGINE)        \n";
+                            logFile << L"==========================================================\n";
+                            logFile << L"Thư mục gốc : " << batchCtx->rootPath << L"\n";
+                            logFile << L"Tổng số file: " << batchCtx->processedFiles.load() << L" files\n";
+                            logFile << L"Phát hiện   : " << batchCtx->infectedFiles.size() << L" THREATS!\n";
+                            logFile << L"----------------------------------------------------------\n";
+
+                            // Ghi toàn bộ danh sách virus vào file
+                            for (const auto& threat : batchCtx->infectedFiles) {
+                                logFile << L"[Điểm: " << fixed << setprecision(1) << threat.second << L"] -> " << threat.first << L"\n";
+                            }
+                            logFile << L"==========================================================\n";
+                            logFile.close();
+                        }
+
+                        // 2. NHÉT PREVIEW VÀO THREAT LIST GỬI CHO CLIENT (Giới hạn 900 ký tự để không tràn)
+                        swprintf(status.message, 255, L"Phat hien %zu VIRUS! Đa luu file: %s", batchCtx->infectedFiles.size(), logFileName.c_str());
                         status.result = 2;
 
                         wstring aggregateList = L"";
                         for (const auto& threat : batchCtx->infectedFiles) {
                             wchar_t line[512];
-                            // Format: [4.5đ] C:\path\virus.exe
                             swprintf(line, 512, L"[%.1f diem] %s\n", threat.second, threat.first.c_str());
 
-                            // Tránh tràn Buffer của IPC (Giới hạn threatList là 1000 byte)
-                            if (aggregateList.length() + wcslen(line) < 950) {
+                            // Nếu vẫn còn chỗ trong gói tin IPC thì nhét tiếp
+                            if (aggregateList.length() + wcslen(line) < 900) {
                                 aggregateList += line;
                             }
                             else {
-                                aggregateList += L"...(va nhieu file khac)\n";
+                                // Nếu đầy rồi thì chèn câu nhắc người dùng mở file Log ra xem
+                                aggregateList += L"\n... (Và nhiều file khác. Mở file " + logFileName + L" để xem toàn bộ!)";
                                 break;
                             }
                         }
