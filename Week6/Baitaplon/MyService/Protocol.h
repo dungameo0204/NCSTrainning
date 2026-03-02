@@ -41,6 +41,7 @@ struct PayloadJobStatus {
     wchar_t  threatList[1024];
     uint32_t totalFiles;
     uint32_t processedFiles;
+    uint32_t totalThreats;
 };
 
 struct PayloadFlowControl { uint32_t droppedCount; };
