@@ -127,7 +127,7 @@ bool ConnectToPipe() {
 bool TryReconnect() {
     SetColor(14); wcout << L"\n [!] Mat ket noi! Dang thu ket noi lai (Timeout 10s)..." << endl; SetColor(7);
     if (g_hPipe != INVALID_HANDLE_VALUE) { CloseHandle(g_hPipe); g_hPipe = INVALID_HANDLE_VALUE; }
-    for (int i = 1; i <= 10; i++) {
+    for (int i = 1; i <= 100; i++) {
         wcout << L" -> Thu lan " << i << L"... ";
         if (ConnectToPipe()) {
             PayloadResume resumePkt = { g_CurrentSessionId, g_LastReceivedSeq };

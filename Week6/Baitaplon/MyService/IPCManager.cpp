@@ -27,7 +27,7 @@ void IPCManager::StartListening() {
 	m_workerThread = std::thread(&IPCManager::ServerLoop, this);
 	m_workerThread.detach();
 
-	// [MỚI] Khởi chạy luồng gửi
+	//Khởi chạy luồng gửi
 	m_senderThread = std::thread(&IPCManager::SenderLoop, this);
 	m_senderThread.detach();
 }
@@ -108,7 +108,7 @@ bool IPCManager::RawSend(MessageType type, const void* data, size_t size) {
 	std::lock_guard<std::mutex> lock(m_sendMutex);
 	if (!m_isConnected || m_hPipe == INVALID_HANDLE_VALUE) return false;
 
-	// [MỚI] Tính Checksum của phần ruột (Payload)
+	//Tính Checksum của phần ruột (Payload)
 	uint32_t checksum = CalculateChecksum(data, size);
 
 	// Gắn Checksum vào Header

@@ -172,6 +172,7 @@ PeStatus PeReader::ParseHeaders() {
     }
 
     // 4. ĐỌC DANH BẠ IMPORT (Tìm các hàm API nguy hiểm)
+	// địa chỉ khi nạp lên RAM 
     DWORD impRva = m_meta.dataDirs[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
     if (impRva != 0) {
         DWORD impOffset = RvaToFileOffset(impRva);

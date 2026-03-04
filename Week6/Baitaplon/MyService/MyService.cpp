@@ -42,6 +42,7 @@ struct BatchContext {
 	// [MỚI] GIỎ ĐỰNG DANH SÁCH VIRUS & ĐIỂM SỐ
 	mutex threatMutex;
 	vector<pair<wstring, float>> infectedFiles;
+	std::atomic<int> activeWorkers{ 0 };
 };
 
 mutex g_JobMutex;
@@ -61,17 +62,23 @@ struct CacheEntry {
 	long long writeTime;
 	float score;           // [MỚI] Lưu thêm điểm Heuristic vào RAM
 };
+enum class SystemState { IDLE, BUSY, OVERLOADED };
+std::atomic<SystemState> g_SystemState{ SystemState::IDLE };
+
+
 
 std::unordered_map<std::wstring, CacheEntry> g_ScanCache;
 std::mutex g_CacheMutex;
 long long g_EngineVersion = 0;
-
+// Biến lưu thời gian CPU cũ để tính toán delta
+FILETIME prevIdleTime, prevKernelTime, prevUserTime;
 long long GetEngineVersion() {
 	try {
 		return fs::last_write_time(L"ScannerEngine.dll").time_since_epoch().count();
 	}
 	catch (...) { return 0; }
 }
+
 
 // --- SCANNER ENGINE ---
 typedef int(__stdcall* FnScanFile)(const wchar_t*, int, void*);
@@ -140,6 +147,51 @@ void SaveCacheToDisk() {
 	std::cout << "[CACHE] Da luu " << cacheSize << " file xuong o cung." << std::endl;
 }
 
+void ResourceMonitorThread() {
+	GetSystemTimes(&prevIdleTime, &prevKernelTime, &prevUserTime);
+
+	while (true) {
+		Sleep(1000); // Đo mỗi giây 1 lần
+
+		// 1. ĐO RAM
+		MEMORYSTATUSEX memInfo;
+		memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+		GlobalMemoryStatusEx(&memInfo);
+		DWORD ramUsage = memInfo.dwMemoryLoad; // % RAM đang dùng
+
+		// 2. ĐO CPU
+		FILETIME idleTime, kernelTime, userTime;
+		GetSystemTimes(&idleTime, &kernelTime, &userTime);
+
+		ULONGLONG idle = (ULONGLONG)idleTime.dwLowDateTime | ((ULONGLONG)idleTime.dwHighDateTime << 32);
+		ULONGLONG kernel = (ULONGLONG)kernelTime.dwLowDateTime | ((ULONGLONG)kernelTime.dwHighDateTime << 32);
+		ULONGLONG user = (ULONGLONG)userTime.dwLowDateTime | ((ULONGLONG)userTime.dwHighDateTime << 32);
+
+		ULONGLONG prevIdle = (ULONGLONG)prevIdleTime.dwLowDateTime | ((ULONGLONG)prevIdleTime.dwHighDateTime << 32);
+		ULONGLONG prevKernel = (ULONGLONG)prevKernelTime.dwLowDateTime | ((ULONGLONG)prevKernelTime.dwHighDateTime << 32);
+		ULONGLONG prevUser = (ULONGLONG)prevUserTime.dwLowDateTime | ((ULONGLONG)prevUserTime.dwHighDateTime << 32);
+
+		ULONGLONG sysDiff = (kernel - prevKernel) + (user - prevUser);
+		ULONGLONG idleDiff = idle - prevIdle;
+
+		int cpuUsage = 0;
+		if (sysDiff > 0) cpuUsage = (int)((sysDiff - idleDiff) * 100 / sysDiff);
+
+		prevIdleTime = idleTime; prevKernelTime = kernelTime; prevUserTime = userTime;
+
+		// 3. CHUYỂN TRẠNG THÁI (STATE MACHINE)
+		if (cpuUsage > 90 || ramUsage > 90) {
+			g_SystemState = SystemState::OVERLOADED;
+		}
+		else if (cpuUsage > 50 || ramUsage > 70) {
+			g_SystemState = SystemState::BUSY;
+		}
+		else {
+			g_SystemState = SystemState::IDLE;
+		}
+	}
+}
+
 bool IsPathDeniedInService(const std::wstring& path) {
 	std::wstring lowerPath = path;
 	std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::towlower);
@@ -163,6 +215,9 @@ void WorkerThreadFunc() {
 		int32_t batchId = -1;
 		shared_ptr<BatchContext> batchCtx;
 
+		// [CỜ HIỆU LỆNH MỚI]
+		bool shouldFinalize = false;
+
 		{
 			unique_lock<mutex> lock(g_JobMutex);
 			g_cvQueue.wait(lock, [] { return !g_BatchOrder.empty(); });
@@ -175,157 +230,195 @@ void WorkerThreadFunc() {
 			}
 			batchCtx = g_AllBatches[batchId];
 
-			// NẾU HẾT FILE THÌ CHỐT SỔ VÀ BÁO CÁO DANH SÁCH VIRUS
 			if (g_BatchJobs[batchId].empty()) {
-				if (batchCtx->isLoadFinished) {
-					g_BatchOrder.pop_front();
-
-					PayloadJobStatus status = { 0 };
-					status.jobId = batchId;
-					status.status = 2; // Finished
-					status.totalFiles = batchCtx->totalFiles.load();
-					status.processedFiles = batchCtx->processedFiles.load();
-
-					// [MỚI] TỔNG HỢP DANH SÁCH MÀ XUẤT RA FILE LOG
-					lock_guard<mutex> threatLock(batchCtx->threatMutex);
-					status.totalThreats = (uint32_t)batchCtx->infectedFiles.size();
-					if (batchCtx->infectedFiles.empty()) {
-						wcscpy_s(status.message, L"Scan Finished: Safe! No threats found.");
-						status.result = 0;
-					}
-					else {
-						// 1. TẠO FILE BÁO CÁO (LOG FILE)
-						wstring logFileName = L"ScanReport_Job" + to_wstring(batchId) + L".txt";
-
-						// Chuyển sang UTF-8 để ghi file txt không bị lỗi font tiếng Việt
-						wofstream logFile(logFileName, ios::out | ios::trunc);
-
-						// [FIX LỖI C4996] Ép Visual Studio câm mồm không được báo lỗi Deprecated của C++17
-#pragma warning(push)
-#pragma warning(disable: 4996)
-						logFile.imbue(locale(locale::empty(), new codecvt_utf8<wchar_t>));
-#pragma warning(pop)
-
-						if (logFile.is_open()) {
-							logFile << L"==========================================================\n";
-							logFile << L"            BÁO CÁO QUÉT MÃ ĐỘC (HEURISTIC ENGINE)        \n";
-							logFile << L"==========================================================\n";
-							logFile << L"Thư mục gốc : " << batchCtx->rootPath << L"\n";
-							logFile << L"Tổng số file: " << batchCtx->processedFiles.load() << L" files\n";
-							logFile << L"Phát hiện   : " << batchCtx->infectedFiles.size() << L" THREATS!\n";
-							logFile << L"----------------------------------------------------------\n";
-
-							// Ghi toàn bộ danh sách virus vào file
-							for (const auto& threat : batchCtx->infectedFiles) {
-								logFile << L"[Điểm: " << fixed << setprecision(1) << threat.second << L"] -> " << threat.first << L"\n";
-							}
-							logFile << L"==========================================================\n";
-							logFile.close();
-						}
-
-						// 2. NHÉT PREVIEW VÀO THREAT LIST GỬI CHO CLIENT (Giới hạn 900 ký tự để không tràn)
-						swprintf(status.message, 255, L"Phat hien %zu VIRUS! Đa luu file: %s", batchCtx->infectedFiles.size(), logFileName.c_str());
-						status.result = 2;
-
-						wstring aggregateList = L"";
-						for (const auto& threat : batchCtx->infectedFiles) {
-							wchar_t line[512];
-							swprintf(line, 512, L"[%.1f diem] %s\n", threat.second, threat.first.c_str());
-
-							// Nếu vẫn còn chỗ trong gói tin IPC thì nhét tiếp
-							if (aggregateList.length() + wcslen(line) < 900) {
-								aggregateList += line;
-							}
-							else {
-								// Nếu đầy rồi thì chèn câu nhắc người dùng mở file Log ra xem
-								aggregateList += L"\n... (Và nhiều file khác. Mở file " + logFileName + L" để xem toàn bộ!)";
-								break;
-							}
-						}
-						wcsncpy_s(status.threatList, aggregateList.c_str(), 1000);
-					}
-
-					lock.unlock();
-					g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), true);
-					continue;
-				}
-				else {
+				if (!batchCtx->isLoadFinished) {
 					g_cvQueue.wait(lock);
 					continue;
 				}
-			}
-
-			currentJob = g_BatchJobs[batchId].front();
-			g_BatchJobs[batchId].pop_front();
-		}
-
-		if (batchCtx->isCancelled) continue;
-
-		int result = 0;
-		bool needScan = true;
-		uintmax_t currentSize = 0;
-		long long currentTime = 0;
-		float currentScore = 0.0f; // [MỚI] Hứng điểm từ DLL
-
-		try {
-			currentSize = fs::file_size(currentJob.filePath);
-			currentTime = fs::last_write_time(currentJob.filePath).time_since_epoch().count();
-
-			std::lock_guard<std::mutex> cacheLock(g_CacheMutex);
-			auto it = g_ScanCache.find(currentJob.filePath);
-
-			if (it != g_ScanCache.end()) {
-				if (it->second.fileSize == currentSize && it->second.writeTime == currentTime) {
-					result = it->second.result;
-					currentScore = it->second.score; // Kéo điểm từ RAM ra
-					needScan = false;
+				else {
+					// VÁ LỖI TẠI ĐÂY: Bốc vác xong muộn, thợ tỉnh dậy thấy giỏ trống
+					if (batchCtx->activeWorkers.load() == 0) {
+						auto it = std::find(g_BatchOrder.begin(), g_BatchOrder.end(), batchId);
+						if (it != g_BatchOrder.end()) {
+							g_BatchOrder.erase(it);
+							shouldFinalize = true; // Bắt thằng thợ này ôm cờ đi chốt sổ!
+						}
+					}
+					// Nếu chưa tới lượt chốt thì quay lại ngủ
+					if (!shouldFinalize) continue;
 				}
 			}
-		}
-		catch (...) {}
 
-		// 2. GỌI DLL QUÉT
-		if (needScan) {
-			// [MỚI] Truyền con trỏ &currentScore vào tham số thứ 3
-			result = g_ScanFile ? g_ScanFile(currentJob.filePath.c_str(), 0, &currentScore) : 0;
+			// Nếu không phải đi chốt sổ thì mới bốc file
+			if (!shouldFinalize) {
+				currentJob = g_BatchJobs[batchId].front();
+				g_BatchJobs[batchId].pop_front();
+				batchCtx->activeWorkers++;
+			}
+		} // Unlock
 
-			std::lock_guard<std::mutex> cacheLock(g_CacheMutex);
-			g_ScanCache[currentJob.filePath] = { result, currentSize, currentTime, currentScore };
-		}
+		// =================================================================
+		// CHỈ QUÉT FILE NẾU KHÔNG PHẢI LÀM NHIỆM VỤ CHỐT SỔ
+		// =================================================================
+		if (!shouldFinalize) {
+			if (batchCtx->isCancelled) {
+				batchCtx->activeWorkers--;
+				continue;
+			}
 
-		// 3. XỬ LÝ NẾU TÓM ĐƯỢC VIRUS
-		PayloadJobStatus status = { 0 };
-		status.jobId = batchId;
-		status.status = 1; // Scanning
-		wcsncpy_s(status.message, currentJob.filePath.c_str(), 255);
+			// Lắp Phanh (Throttle)
+			SystemState currentState = g_SystemState.load();
+			if (currentState == SystemState::OVERLOADED) {
+				Sleep(200);
+			}
+			else if (currentState == SystemState::BUSY) {
+				Sleep(50);
+			}
 
-		if (batchCtx) {
-			batchCtx->processedFiles++;
+			int result = 0;
+			bool needScan = true;
+			uintmax_t currentSize = 0;
+			long long currentTime = 0;
+			float currentScore = 0.0f;
 
-			status.totalFiles = batchCtx->totalFiles.load();
-			status.processedFiles = batchCtx->processedFiles.load();
+			try {
+				currentSize = fs::file_size(currentJob.filePath);
+				currentTime = fs::last_write_time(currentJob.filePath).time_since_epoch().count();
+
+				std::lock_guard<std::mutex> cacheLock(g_CacheMutex);
+				auto it = g_ScanCache.find(currentJob.filePath);
+
+				if (it != g_ScanCache.end()) {
+					if (it->second.fileSize == currentSize && it->second.writeTime == currentTime) {
+						result = it->second.result;
+						currentScore = it->second.score;
+						needScan = false;
+					}
+				}
+			}
+			catch (...) {}
+
+			if (needScan) {
+				result = g_ScanFile ? g_ScanFile(currentJob.filePath.c_str(), 0, &currentScore) : 0;
+				std::lock_guard<std::mutex> cacheLock(g_CacheMutex);
+				g_ScanCache[currentJob.filePath] = { result, currentSize, currentTime, currentScore };
+			}
+
+			PayloadJobStatus status = { 0 };
+			status.jobId = batchId;
+			status.status = 1;
+			wcsncpy_s(status.message, currentJob.filePath.c_str(), 255);
+
+			if (batchCtx) {
+				uint32_t currentProcessed = ++(batchCtx->processedFiles);
+
+				if (result == 2) {
+					// CÓ VIRUS -> GỬI IPC BÁO ĐỘNG NGAY
+					status.totalFiles = batchCtx->totalFiles.load();
+					status.processedFiles = currentProcessed;
+					{
+						lock_guard<mutex> threatLock(batchCtx->threatMutex);
+						batchCtx->infectedFiles.push_back({ currentJob.filePath, currentScore });
+						status.totalThreats = (uint32_t)batchCtx->infectedFiles.size();
+					}
+					wcscpy_s(status.message, L"VIRUS FOUND!");
+					status.result = 2;
+					swprintf(status.threatList, 1000, L"[%.1f diem] %s", currentScore, currentJob.filePath.c_str());
+					g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), true);
+				}
+				else {
+					// AN TOÀN -> GỬI IPC NHỎ GIỌT (100 FILE 1 LẦN)
+					if (currentProcessed % 100 == 0) {
+						status.totalFiles = batchCtx->totalFiles.load();
+						status.processedFiles = currentProcessed;
+						{
+							lock_guard<mutex> threatLock(batchCtx->threatMutex);
+							status.totalThreats = (uint32_t)batchCtx->infectedFiles.size();
+						}
+						g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), false);
+					}
+				}
+			}
+
+			// Quét xong 1 file, kiểm tra xem có phải thằng cuối cùng không
+			int remainingWorkers = --(batchCtx->activeWorkers);
+			{
+				lock_guard<mutex> checkLock(g_JobMutex);
+				if (remainingWorkers == 0 && g_BatchJobs[batchId].empty() && batchCtx->isLoadFinished) {
+					auto it = std::find(g_BatchOrder.begin(), g_BatchOrder.end(), batchId);
+					if (it != g_BatchOrder.end()) {
+						g_BatchOrder.erase(it);
+						shouldFinalize = true; // Vớt được cờ chốt sổ ở phút 89
+					}
+				}
+			}
+		} // Kết thúc logic bốc file và quét
+
+		// =====================================================================
+		// CHỐT SỔ KIM CƯƠNG: CỨ CẦM CỜ LÀ ĐƯỢC XUẤT HÓA ĐƠN
+		// =====================================================================
+		if (shouldFinalize) {
+			PayloadJobStatus finalStatus = { 0 };
+			finalStatus.jobId = batchId;
+			finalStatus.status = 2; // Finished
+			finalStatus.totalFiles = batchCtx->totalFiles.load();
+			finalStatus.processedFiles = batchCtx->processedFiles.load();
+
 			{
 				lock_guard<mutex> threatLock(batchCtx->threatMutex);
-				status.totalThreats = (uint32_t)batchCtx->infectedFiles.size();
-			}
+				finalStatus.totalThreats = (uint32_t)batchCtx->infectedFiles.size();
 
-			if (result == 2) {
-				// Nhét vào giỏ rác của mẻ quét hiện tại
-				{
-					lock_guard<mutex> threatLock(batchCtx->threatMutex);
-					batchCtx->infectedFiles.push_back({ currentJob.filePath, currentScore });
-					status.totalThreats = (uint32_t)batchCtx->infectedFiles.size();
+				if (batchCtx->infectedFiles.empty()) {
+					wcscpy_s(finalStatus.message, L"Scan Finished: Safe! No threats found.");
+					finalStatus.result = 0;
 				}
+				else {
+					wstring logFileName = L"ScanReport_Job" + to_wstring(batchId) + L".txt";
+					wofstream logFile(logFileName, ios::out | ios::trunc);
 
-				wcscpy_s(status.message, L"VIRUS FOUND!");
-				status.result = 2;
-				// Báo động trực tiếp file này về Client
-				swprintf(status.threatList, 1000, L"[%.1f diem] %s", currentScore, currentJob.filePath.c_str());
-				g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), true);
-			}
-			else {
-				g_ipcManager.Send(MSG_JOB_STATUS, &status, sizeof(status), false);
-			}
+#pragma warning(push)
+#pragma warning(disable: 4996)
+					logFile.imbue(locale(locale::empty(), new codecvt_utf8<wchar_t>));
+#pragma warning(pop)
+
+					if (logFile.is_open()) {
+						logFile << L"==========================================================\n";
+						logFile << L"            BÁO CÁO QUÉT MÃ ĐỘC (HEURISTIC ENGINE)        \n";
+						logFile << L"==========================================================\n";
+						logFile << L"Thư mục gốc : " << batchCtx->rootPath << L"\n";
+						logFile << L"Tổng số file: " << batchCtx->processedFiles.load() << L" files\n";
+						logFile << L"Phát hiện   : " << batchCtx->infectedFiles.size() << L" THREATS!\n";
+						logFile << L"----------------------------------------------------------\n";
+
+						for (const auto& threat : batchCtx->infectedFiles) {
+							logFile << L"[Điểm: " << fixed << setprecision(1) << threat.second << L"] -> " << threat.first << L"\n";
+						}
+						logFile << L"==========================================================\n";
+						logFile.close();
+					}
+
+					swprintf(finalStatus.message, 255, L"Phat hien %zu VIRUS! Đa luu file: %s", batchCtx->infectedFiles.size(), logFileName.c_str());
+					finalStatus.result = 2;
+
+					wstring aggregateList = L"";
+					for (const auto& threat : batchCtx->infectedFiles) {
+						wchar_t line[512];
+						swprintf(line, 512, L"[%.1f diem] %s\n", threat.second, threat.first.c_str());
+
+						if (aggregateList.length() + wcslen(line) < 900) {
+							aggregateList += line;
+						}
+						else {
+							aggregateList += L"\n... (Và nhiều file khác. Mở file " + logFileName + L" để xem toàn bộ!)";
+							break;
+						}
+					}
+					wcsncpy_s(finalStatus.threatList, aggregateList.c_str(), 1000);
+				}
+			} // Mở khóa threatLock
+
+			// BÙM! PHÓNG HÓA ĐƠN SANG CLIENT
+			g_ipcManager.Send(MSG_JOB_STATUS, &finalStatus, sizeof(finalStatus), true);
 		}
 	}
 }
@@ -369,7 +462,7 @@ void ThreadLoader(int32_t batchId, wstring rootPath) {
 					}
 					g_cvQueue.notify_one();
 
-					if (currentTotal % 2000 == 0) {
+					if (currentTotal % 10000 == 0) {
 						PayloadJobStatus status = { 0 };
 						status.jobId = batchId;
 						status.status = 1;
